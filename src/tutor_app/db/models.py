@@ -42,6 +42,10 @@ class PracticeLog(Base):
     is_correct = Column(Boolean, nullable=False)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
+     # 【新增字段】
+    ai_score = Column(String, nullable=True)     # e.g., "正确", "部分正确", "错误"
+    ai_feedback = Column(Text, nullable=True)    # 存储AI给出的详细评语
+
 # src/tutor_app/db/models.py
 # ... (保留所有已有的模型)
 
@@ -53,15 +57,19 @@ class Exam(Base):
     question_ids = Column(JSON, nullable=False) # 存储本次考试包含的所有问题ID
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+# src/tutor_app/db/models.py
+# ... (保留所有已有的模型)
+
 class ExamResult(Base):
     __tablename__ = "exam_results"
     id = Column(Integer, primary_key=True, index=True)
     exam_id = Column(Integer, ForeignKey("exams.id"), nullable=False)
     score = Column(Integer, nullable=False)
     total = Column(Integer, nullable=False)
-    user_answers = Column(JSON, nullable=False) # 存储用户对每道题的答案
+    user_answers = Column(JSON, nullable=False)
+    # 【新增字段】用于存储 {question_id: log_id} 的映射
+    grading_log_ids = Column(JSON, nullable=True) 
     submitted_at = Column(DateTime, default=datetime.datetime.utcnow)
-
 # src/tutor_app/db/models.py
 # ... (保留所有已有的 imports 和模型)
 from sqlalchemy import Float, Date

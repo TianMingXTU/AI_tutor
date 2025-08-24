@@ -92,14 +92,6 @@ def save_exam_and_get_id(db: Session, source_id: int, title: str, question_ids: 
     db.refresh(exam)
     return exam.id
 
-def save_exam_result(db: Session, exam_id: int, score: int, total: int, user_answers: dict):
-    """保存一次考试的结果"""
-    result = ExamResult(exam_id=exam_id, score=score, total=total, user_answers=user_answers)
-    db.add(result)
-    db.commit()
-    db.refresh(result)
-    return result
-
 # src/tutor_app/crud/crud_question.py
 
 # ... (保留所有已有函数)
@@ -261,3 +253,98 @@ def get_questions_by_ids(db: Session, question_ids: List[int]):
     if not question_ids:
         return []
     return db.query(Question).filter(Question.id.in_(question_ids)).all()
+
+# src/tutor_app/crud/crud_question.py
+
+# ... (保留所有已有函数)
+from src.tutor_app.db.models import PracticeLog, UserQuestionStats
+from src.tutor_app.core.srs_logic import update_srs_stats
+
+def log_practice_and_update_srs(db: Session, question_id: int, is_correct: bool, quality: int, user_answer: str, user_id: int = 1):
+    """
+    【全新】一站式函数：记录练习并同步更新SRS记忆状态。
+    quality: 用户对题目掌握程度的评分 (0-5)。
+    """
+    # 1. 记录练习日志
+    log_entry = PracticeLog(
+        question_id=question_id,
+        user_answer=user_answer,
+        is_correct=is_correct
+    )
+    db.add(log_entry)
+
+    # 2. 更新或创建SRS状态
+    stats = db.query(UserQuestionStats).filter_by(user_id=user_id, question_id=question_id).first()
+    if not stats:
+        stats = UserQuestionStats(user_id=user_id, question_id=question_id)
+        db.add(stats)
+    
+    # 使用SRS算法更新状态
+    update_srs_stats(stats, quality)
+
+    db.commit()
+    db.refresh(log_entry)
+    return log_entry
+
+# src/tutor_app/crud/crud_question.py
+# ... (保留所有已有函数)
+
+def create_log_for_grading(db: Session, question_id: int, user_answer: str) -> int:
+    """
+    【全新】为即将开始的AI评分创建一个初始的练习日志。
+    """
+    log_entry = PracticeLog(
+        question_id=question_id,
+        user_answer=user_answer,
+        is_correct=False  # 默认为False，等待AI评分后可能更新
+    )
+    db.add(log_entry)
+    db.commit()
+    db.refresh(log_entry)
+    return log_entry.id
+
+# src/t.app/crud/crud_question.py
+# ... (保留所有已有函数)
+import datetime
+
+def count_review_questions_today(db: Session, user_id: int = 1) -> int:
+    """
+    【新增】快速统计今天及之前所有待复习的题目数量。
+    """
+    today = datetime.date.today()
+    return db.query(UserQuestionStats)\
+             .filter(UserQuestionStats.user_id == user_id, 
+                     UserQuestionStats.next_review_date <= today)\
+             .count()
+
+# src/tutor_app/crud/crud_question.py
+# ...
+from typing import Dict, Optional, List # 确保导入 Dict, Optional, List
+
+# 【修改】增加一个
+def save_exam_result(db: Session, exam_id: int, score: int, total: int, user_answers: dict, grading_log_ids: Optional[Dict[int, int]] = None):
+    """保存一次考试的结果"""
+    result = ExamResult(
+        exam_id=exam_id, 
+        score=score, 
+        total=total, 
+        user_answers=user_answers,
+        grading_log_ids=grading_log_ids # <-- 保存新增的字段
+    )
+    db.add(result)
+    db.commit()
+    db.refresh(result)
+    return result
+
+# src/tutor_app/crud/crud_question.py
+# ... (文件末尾)
+
+def get_grading_results(db: Session, log_ids: List[int]) -> Dict[int, PracticeLog]:
+    """
+    【新增】根据一个log_id列表，批量获取所有评分日志。
+    """
+    if not log_ids:
+        return {}
+
+    logs = db.query(PracticeLog).filter(PracticeLog.id.in_(log_ids)).all()
+    return {log.id: log for log in logs}

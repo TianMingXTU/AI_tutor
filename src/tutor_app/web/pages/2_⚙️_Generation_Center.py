@@ -6,8 +6,13 @@ from src.tutor_app.db.session import SessionLocal
 from src.tutor_app.db.models import KnowledgeSource
 from src.tutor_app.tasks.generation import generate_questions_task
 from src.tutor_app.core.utils import convert_to_beijing_time
+from src.tutor_app.web.components.task_monitor import display_global_task_monitor
 
+# --- 页面配置与全局组件 ---
 st.set_page_config(page_title="出题中心", layout="wide")
+display_global_task_monitor()
+
+# --- 页面主体 ---
 st.title("⚙️ 出题中心")
 st.write("在这里，您可以根据已处理的知识库生成题目，并监控所有后台任务的状态。")
 
@@ -39,28 +44,19 @@ with tab1:
                     if selected_option and type_counts:
                         source_id = source_options[selected_option]
                         
-                        with st.status("出题任务已提交，正在后台生成...", expanded=True) as status:
-                            # --- 【核心修复】将包含多种题型和数量的字典直接传递给Celery任务 ---
-                            # 现在的调用方式是 (source_id, type_counts)，与后端定义完全匹配
-                            task = generate_questions_task.delay(source_id, type_counts)
-                            
-                            status.update(label=f"任务已派发 (ID: {task.id})，等待AI引擎响应...")
-                            total_questions = sum(type_counts.values())
+                        # 【核心改动】调用Celery任务并注册到全局监控器
+                        task = generate_questions_task.delay(source_id, type_counts)
+                        
+                        if 'active_tasks' not in st.session_state:
+                            st.session_state.active_tasks = {}
+                        
+                        st.session_state.active_tasks[task.id] = {
+                            "name": f"为 '{selected_option}' 生成题目"
+                        }
 
-                            while not task.ready():
-                                progress_info = task.info or {}
-                                current = progress_info.get('current', 0)
-                                status_text = progress_info.get('status', 'AI正在创作中...')
-                                status.update(label=f"{status_text} ({current}/{total_questions})")
-                                time.sleep(2)
-                            
-                            if task.state == 'SUCCESS':
-                                result = task.result
-                                status.update(label=f"任务完成！成功生成 {result.get('generated', 0)} 道题。", state="complete", expanded=False)
-                                st.balloons()
-                            else:
-                                status.update(label="任务失败！详情请查看日志。", state="error", expanded=True)
-                                st.error(f"任务失败信息: {task.info}")
+                        st.toast("题目生成任务已提交到后台！您可以在侧边栏查看进度。")
+                        time.sleep(1)
+                        st.rerun()
                     else:
                         st.warning("请选择知识库并至少配置一种题型。")
             else:

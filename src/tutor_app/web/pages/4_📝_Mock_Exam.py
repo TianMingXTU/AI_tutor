@@ -3,16 +3,56 @@ import streamlit as st
 import json
 import time
 import re
+import pandas as pd
 from datetime import timedelta
 from src.tutor_app.db.session import SessionLocal
 from src.tutor_app.db.models import KnowledgeSource
-from src.tutor_app.crud.crud_question import get_question_batch_with_type_selection, save_exam_and_get_id, save_exam_result
+# 【优化1】导入所有需要的函数和模型
+from src.tutor_app.crud.crud_question import (
+    get_question_batch_with_type_selection, 
+    save_exam_and_get_id, 
+    save_exam_result,
+    create_log_for_grading,
+    get_grading_results
+)
+from src.tutor_app.tasks.grading import grade_short_answer_task
+from src.tutor_app.web.components.task_monitor import display_global_task_monitor
 
 st.set_page_config(page_title="模拟考试", layout="wide")
+display_global_task_monitor()
 st.title("📝 模拟考试模式")
 
+# ... (analyze_exam_by_tag, question_to_dict, Session State 初始化保持不变)
+def analyze_exam_by_tag(questions, user_answers):
+    tag_stats = {}
+    for q in questions:
+        q_id = q['id']
+        tag = q.get('knowledge_tag')
+        if not tag: continue
+        if tag not in tag_stats: tag_stats[tag] = {"correct": 0, "total": 0}
+        tag_stats[tag]["total"] += 1
+        user_ans = user_answers.get(q_id)
+        is_correct = False
+        try:
+            content = json.loads(q['content'])
+            answer_data = json.loads(q['answer'])
+            if q['question_type'] == "单项选择题":
+                correct_answer_text = content["options"][answer_data["correct_option_index"]]
+                if user_ans == correct_answer_text: is_correct = True
+            elif q['question_type'] == "判断题":
+                correct_answer_text = "正确" if answer_data["correct_answer"] else "错误"
+                if user_ans == correct_answer_text: is_correct = True
+        except Exception: pass
+        if is_correct: tag_stats[tag]["correct"] += 1
+    if not tag_stats: return pd.DataFrame()
+    df_data = []
+    for tag, stats in tag_stats.items():
+        accuracy = (stats['correct'] / stats['total'] * 100) if stats['total'] > 0 else 0
+        df_data.append({"知识点": tag, "题目总数": stats['total'], "答对题数": stats['correct'], "正确率(%)": round(accuracy, 2)})
+    return pd.DataFrame(df_data)
+
 def question_to_dict(q):
-    return {"id": q.id, "question_type": q.question_type, "content": q.content, "answer": q.answer, "analysis": q.analysis}
+    return {"id": q.id, "question_type": q.question_type, "content": q.content, "answer": q.answer, "analysis": q.analysis, "knowledge_tag": q.knowledge_tag}
 
 if 'exam_state' not in st.session_state: st.session_state.exam_state = "setup"
 if 'exam_questions' not in st.session_state: st.session_state.exam_questions = []
@@ -20,7 +60,9 @@ if 'exam_id' not in st.session_state: st.session_state.exam_id = None
 if 'exam_result' not in st.session_state: st.session_state.exam_result = None
 if 'exam_end_time' not in st.session_state: st.session_state.exam_end_time = None
 
+
 if st.session_state.exam_state == "setup":
+    # ... (设置界面代码保持不变)
     with st.container(border=True):
         st.header("考试设置")
         db = SessionLocal()
@@ -38,13 +80,13 @@ if st.session_state.exam_state == "setup":
 
             st.subheader("配置试卷题型和数量")
             available_types = ["单项选择题", "判断题", "填空题", "简答题"]
-            selected_types = st.multiselect("请选择试卷包含的题型:", options=available_types, default=["单项选择题", "判断题"])
+            selected_types = st.multiselect("请选择试卷包含的题型:", options=available_types, default=["单项选择题", "判断题", "简答题"])
             type_counts = {}
             if selected_types:
                 cols = st.columns(len(selected_types))
                 for i, q_type in enumerate(selected_types):
                     with cols[i]:
-                        type_counts[q_type] = st.number_input(f"“{q_type}”数量:", min_value=1, max_value=50, value=5, key=f"exam_num_{q_type}")
+                        type_counts[q_type] = st.number_input(f"“{q_type}”数量:", min_value=1, max_value=50, value=2, key=f"exam_num_{q_type}")
             
             total_q_count = sum(type_counts.values()) if type_counts else 0
             exam_duration_minutes = st.number_input("设置考试时长（分钟）:", min_value=1, value=int(total_q_count * 1.5))
@@ -76,6 +118,7 @@ if st.session_state.exam_state == "setup":
             db.close()
 
 elif st.session_state.exam_state == "running":
+    # ... (考试进行中界面代码保持不变)
     with st.sidebar:
         st.header("⏳ 考试倒计时")
         timer_placeholder = st.empty()
@@ -118,30 +161,57 @@ elif st.session_state.exam_state == "running":
         
         submitted = st.form_submit_button("交卷并查看结果")
         if submitted or remaining_time <= 0:
-            score = 0
-            total = len(st.session_state.exam_questions)
-            for q in st.session_state.exam_questions:
-                try:
-                    # (此处仅为示例，仅对单选题评分，可按需扩展)
-                    if q['question_type'] == "单项选择题":
-                        correct_answer_index = json.loads(q['answer'])["correct_option_index"]
-                        options = json.loads(q['content'])["options"]
-                        if user_answers.get(q['id']) == options[correct_answer_index]:
-                            score += 1
-                except Exception:
-                    continue
-            
             db = SessionLocal()
-            save_exam_result(db, st.session_state.exam_id, score, total, {k: str(v) for k, v in user_answers.items() if v is not None})
-            db.close()
-            st.session_state.exam_result = {
-                "score": score, "total": total, "questions": st.session_state.exam_questions,
-                "user_answers": user_answers
-            }
-            st.session_state.exam_in_progress = False
-            st.session_state.exam_questions = []
-            st.session_state.exam_state = "finished"
-            st.rerun()
+            try:
+                # --- 【优化2: 交卷时触发AI评分】 ---
+                score = 0
+                total = len(st.session_state.exam_questions)
+                grading_log_ids_map = {}
+
+                for q in st.session_state.exam_questions:
+                    q_id = q['id']
+                    user_ans = user_answers.get(q_id)
+                    
+                    if q['question_type'] == "简答题" and user_ans and user_ans.strip():
+                        # 1. 为简答题创建评分日志
+                        log_id = create_log_for_grading(db, q_id, user_ans)
+                        grading_log_ids_map[q_id] = log_id
+                        # 2. 派发异步评分任务
+                        grade_short_answer_task.delay(log_id)
+                    else:
+                        # 3. 为客观题直接评分
+                        is_correct = False
+                        try:
+                            content = json.loads(q['content'])
+                            answer_data = json.loads(q['answer'])
+                            if q['question_type'] == "单项选择题":
+                                correct_answer_text = content["options"][answer_data["correct_option_index"]]
+                                if user_ans == correct_answer_text: is_correct = True
+                            elif q['question_type'] == "判断题":
+                                correct_answer_text = "正确" if answer_data["correct_answer"] else "错误"
+                                if user_ans == correct_answer_text: is_correct = True
+                            if is_correct:
+                                score += 1
+                        except Exception:
+                            continue
+                
+                # 4. 保存考试结果，包括简答题的log_id映射
+                save_exam_result(
+                    db, st.session_state.exam_id, score, total, 
+                    {k: str(v) for k, v in user_answers.items() if v is not None},
+                    grading_log_ids_map
+                )
+                
+                # 5. 更新 session_state
+                st.session_state.exam_result = {
+                    "score": score, "total": total, "questions": st.session_state.exam_questions,
+                    "user_answers": user_answers,
+                    "grading_log_ids": grading_log_ids_map
+                }
+                st.session_state.exam_state = "finished"
+                st.rerun()
+            finally:
+                db.close()
 
     if remaining_time > 0:
         time.sleep(1)
@@ -151,38 +221,74 @@ elif st.session_state.exam_state == "finished":
     result = st.session_state.exam_result
     st.header("考后分析报告")
     st.balloons()
-    tab1, tab2 = st.tabs(["📊 成绩总览", "🔍 逐题回顾"])
+    
+    tag_analysis_df = analyze_exam_by_tag(result['questions'], result['user_answers'])
+    
+    # --- 【优化3: 在报告中查询并展示AI评分结果】 ---
+    grading_log_ids = result.get("grading_log_ids", {})
+    db = SessionLocal()
+    try:
+        grading_results = get_grading_results(db, list(grading_log_ids.values()))
+    finally:
+        db.close()
+
+    tab1, tab2, tab3 = st.tabs(["📊 成绩总览", "🏷️ 知识点诊断", "🔍 逐题回顾"])
+    
     with tab1:
+        # ... (成绩总览代码不变)
         st.subheader("本次考试成绩")
         cols = st.columns(3)
         cols[0].metric("最终得分", f"{result['score']} / {result['total']}")
         accuracy = (result['score'] / result['total'] * 100) if result['total'] > 0 else 0
         cols[1].metric("正确率", f"{accuracy:.1f}%")
         cols[2].metric("题目总数", result['total'])
+    
     with tab2:
-        st.subheader("错题详情解析")
-        has_mistake = False
+        # ... (知识点诊断代码不变)
+        st.subheader("本次考试知识点诊断")
+        if not tag_analysis_df.empty:
+            st.info("这份诊断报告分析了您在本次考试中，各个知识点的表现。请重点关注正确率较低的环节。")
+            sorted_df = tag_analysis_df.sort_values(by='正确率(%)', ascending=True)
+            st.dataframe(sorted_df, use_container_width=True)
+            st.bar_chart(sorted_df.set_index('知识点')['正确率(%)'])
+        else:
+            st.warning("本次考试的题目缺少知识点标签，无法生成诊断报告。")
+
+    with tab3:
+        st.subheader("题目详情回顾")
         for i, q in enumerate(result['questions']):
-            try:
-                # (此处仅为示例，仅对单选题进行回顾，可按需扩展)
-                if q['question_type'] == "单项选择题":
-                    q_id = q['id']
-                    content = json.loads(q['content'])
-                    answer_data = json.loads(q['answer'])
-                    user_ans = result['user_answers'].get(q_id)
-                    correct_answer_text = content["options"][answer_data["correct_option_index"]]
-                    if user_ans != correct_answer_text:
-                        has_mistake = True
-                        with st.expander(f"❌ 第 {i+1} 题: {content.get('question', '')[:30]}...", expanded=True):
-                            st.markdown(f"**题目**: {content.get('question', '题目加载失败')}")
-                            st.error(f"**你的答案**: {user_ans or '未作答'}")
-                            st.success(f"**正确答案**: {correct_answer_text}")
-                            if q.get('analysis'):
-                                st.info(f"**解析**: {q['analysis']}")
-            except Exception:
-                st.warning(f"第 {i+1} 题数据存在问题，无法展示解析。")
-        if not has_mistake:
-            st.success("🎉 恭喜你，本次考试全部正确！")
+            q_id = q['id']
+            with st.expander(f"第 {i+1} 题 ({q['question_type']}): {json.loads(q['content']).get('question', '')[:30]}..."):
+                st.markdown(f"**题目**: {json.loads(q['content']).get('question', '题目加载失败')}")
+                user_ans = result['user_answers'].get(q_id)
+                st.error(f"**你的答案**: {user_ans or '未作答'}")
+
+                if q['question_type'] == "简答题":
+                    log_id = grading_log_ids.get(q_id)
+                    log_entry = grading_results.get(log_id)
+                    if log_entry and log_entry.ai_score:
+                        score_map = {"正确": "success", "部分正确": "warning", "错误": "error"}
+                        score_type = score_map.get(log_entry.ai_score, "info")
+                        getattr(st, score_type)(f"**AI 评价**: {log_entry.ai_score}")
+                        st.info(f"**AI 评语**: {log_entry.ai_feedback}")
+                    else:
+                        st.info("🤖 AI 助教正在批阅您的答案，请稍后刷新...")
+                else: # 客观题
+                    try:
+                        content = json.loads(q['content'])
+                        answer_data = json.loads(q['answer'])
+                        correct_answer_text = ""
+                        if q['question_type'] == "单项选择题":
+                            correct_answer_text = content["options"][answer_data["correct_option_index"]]
+                        elif q['question_type'] == "判断题":
+                            correct_answer_text = "正确" if answer_data["correct_answer"] else "错误"
+                        st.success(f"**正确答案**: {correct_answer_text}")
+                    except:
+                        st.warning("答案解析失败。")
+
+                if q.get('analysis'):
+                    with st.expander("💡 查看原题解析"):
+                        st.info(f"**原题解析**: {q['analysis']}")
             
     if st.button("返回考试首页", use_container_width=True):
         st.session_state.exam_state = "setup"

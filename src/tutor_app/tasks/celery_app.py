@@ -10,7 +10,7 @@ celery_app = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
     # 在列表中加入新的任务文件
-    include=["src.tutor_app.tasks.processing", "src.tutor_app.tasks.generation"]
+    include=["src.tutor_app.tasks.processing", "src.tutor_app.tasks.generation","src.tutor_app.tasks.grading"]
 )
 
 celery_app.conf.update(

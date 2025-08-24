@@ -8,19 +8,28 @@ from src.tutor_app.db.models import KnowledgeSource
 from src.tutor_app.tasks.processing import process_file_task
 from src.tutor_app.core.utils import convert_to_beijing_time
 from src.tutor_app.crud.crud_question import count_questions_by_source, delete_source_and_related_data
+from src.tutor_app.web.components.task_monitor import display_global_task_monitor
+
+# --- 页面配置与全局组件 ---
+st.set_page_config(page_title="知识库管理", layout="wide")
+display_global_task_monitor()
+
+# --- 页面主体 ---
+st.title("📚 知识库管理")
 
 UPLOAD_DIRECTORY = "data/uploaded_files"
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
-
-st.set_page_config(page_title="知识库管理", layout="wide")
-st.title("📚 知识库管理")
 
 col1, col2 = st.columns([1, 2])
 
 with col1:
     with st.container(border=True):
         st.subheader("上传新资料")
-        uploaded_file = st.file_uploader("上传您的PDF学习资料", type="pdf", label_visibility="collapsed")
+        uploaded_file = st.file_uploader(
+            "上传您的学习资料 (PDF, DOCX, MD)",
+            type=["pdf", "docx", "md"],
+            label_visibility="collapsed"
+        )
 
         if uploaded_file is not None:
             filepath = os.path.join(UPLOAD_DIRECTORY, uploaded_file.name)
@@ -40,29 +49,20 @@ with col1:
                         db.refresh(new_source)
                         source_id = new_source.id
                         
-                        # 【核心优化】使用st.status来追踪任务进度
-                        with st.status(f"文件处理任务已提交 (ID: {source_id})...", expanded=True) as status:
-                            task = process_file_task.delay(source_id=source_id)
-                            st.write(f"正在等待Celery Worker接收任务...")
-                            
-                            while not task.ready():
-                                # 轮询任务状态
-                                progress_info = task.info or {}
-                                current = progress_info.get('current', 0)
-                                total = progress_info.get('total', 1)
-                                status_text = progress_info.get('status', '正在处理...')
-                                
-                                # 更新进度条
-                                progress_value = current / total if total > 0 else 0
-                                status.update(label=f"处理中: {status_text} ({current}/{total})")
-                                time.sleep(1)
-                            
-                            if task.state == 'SUCCESS':
-                                status.update(label="文件处理完成！", state="complete", expanded=False)
-                                st.success("文件处理成功！刷新列表查看最新状态。")
-                            else:
-                                status.update(label="任务失败！", state="error", expanded=True)
-                                st.error(f"任务处理失败: {task.info}")
+                        # 【核心改动】调用Celery任务并注册到全局监控器
+                        task = process_file_task.delay(source_id=source_id)
+                        
+                        if 'active_tasks' not in st.session_state:
+                            st.session_state.active_tasks = {}
+                        
+                        st.session_state.active_tasks[task.id] = {
+                            "name": f"处理文件: {uploaded_file.name}"
+                        }
+                        
+                        st.toast("文件处理任务已提交到后台！您可以在侧边栏查看进度。")
+                        # 延迟一小段时间让用户看到toast，然后刷新页面
+                        time.sleep(1)
+                        st.rerun()
 
                 except Exception as e:
                     st.error(f"提交任务时发生错误: {e}")
